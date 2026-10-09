@@ -1,0 +1,43 @@
+name: fedtest-bot-token
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  token-exchange:
+    runs-on: ubuntu-latest
+    env:
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      CLIENT_ID: ${{ vars.CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get GitHub OIDC token
+        run: |
+          gh_jwt=$(curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          echo "::add-mask::$gh_jwt"
+          echo "GH_JWT=$gh_jwt" >> "$GITHUB_ENV"
+          echo "GitHub token claims:"
+          printf '%s' "$gh_jwt" | ./decode_jwt.sh
+
+      - name: Exchange for Bot Framework token
+        run: |
+          resp=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+            -d grant_type=client_credentials \
+            -d client_id="${CLIENT_ID}" \
+            -d scope=https://api.botframework.com/.default \
+            -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+            -d client_assertion="${GH_JWT}")
+          tok=$(printf '%s' "$resp" | jq -r '.access_token // empty')
+          if [ -z "$tok" ]; then
+            echo "Token request failed:"
+            printf '%s' "$resp" | jq '{error, error_description}'
+            exit 1
+          fi
+          echo "::add-mask::$tok"
+          echo "Bot Framework token claims:"
+          printf '%s' "$tok" | ./decode_jwt.sh
