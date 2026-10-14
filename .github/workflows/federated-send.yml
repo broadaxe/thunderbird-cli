@@ -1,0 +1,39 @@
+name: federated-send
+on: workflow_dispatch
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    env:
+      TENANT_ID: d24536eb-1701-4da5-8c34-653fcfe625d2
+      CLIENT_ID: d0cc410e-c66c-4f5e-879a-c840828e52ab
+      CHANNEL_ID: ${{ vars.CHANNEL_ID }}
+    steps:
+      - name: Get GitHub OIDC token
+        run: |
+          JWT=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          echo "::add-mask::$JWT"
+          echo "JWT=$JWT" >> "$GITHUB_ENV"
+      - name: Exchange for Bot Connector token
+        run: |
+          RESP=$(curl -s -X POST "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=$CLIENT_ID" \
+            -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            --data-urlencode "client_assertion=$JWT" \
+            -d "scope=https://api.botframework.com/.default")
+          TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -z "$TOKEN" ]; then echo "Exchange failed:"; echo "$RESP" | jq '{error, error_description}'; exit 1; fi
+          echo "::add-mask::$TOKEN"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "Exchange OK"
+      - name: Send to channel
+        run: |
+          curl -s -o resp.txt -w "HTTP %{http_code}\n" -X POST \
+            "https://smba.trafficmanager.net/amer/v3/conversations/$CHANNEL_ID/activities" \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d '{"type":"message","text":"Federated token test from GitHub Actions"}'
+          cat resp.txt
