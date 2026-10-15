@@ -1,0 +1,60 @@
+name: federated-send-env-card
+on: workflow_dispatch
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    environment: teams-notify
+    env:
+      TENANT_ID: d24536eb-1701-4da5-8c34-653fcfe625d2
+      CLIENT_ID: d0cc410e-c66c-4f5e-879a-c840828e52ab
+      CHANNEL_ID: ${{ vars.CHANNEL_ID }}
+      SERVICE_URL: https://smba.trafficmanager.net/amer/
+    steps:
+      - name: Show OIDC subject
+        run: |
+          JWT=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          echo "::add-mask::$JWT"
+          echo "JWT=$JWT" >> "$GITHUB_ENV"
+          echo "sub: $(echo "$JWT" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r .sub)"
+      - name: Exchange for Bot Connector token
+        run: |
+          RESP=$(curl -s -X POST "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
+            -d "grant_type=client_credentials" -d "client_id=$CLIENT_ID" \
+            -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            --data-urlencode "client_assertion=$JWT" \
+            -d "scope=https://api.botframework.com/.default")
+          TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -z "$TOKEN" ]; then echo "Exchange failed:"; echo "$RESP" | jq '{error, error_description}'; exit 1; fi
+          echo "::add-mask::$TOKEN"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "Exchange OK"
+      - name: Send Adaptive Card
+        run: |
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          payload=$(jq -n --arg run_url "$RUN_URL" '{
+            type: "message",
+            attachments: [{
+              contentType: "application/vnd.microsoft.card.adaptive",
+              content: {
+                "$schema": "https://adaptivecards.io/schemas/adaptive-card.json",
+                type: "AdaptiveCard",
+                version: "1.4",
+                body: [
+                  {type: "TextBlock", text: "✅ Federated card test (environment subject)", weight: "Bolder", size: "Medium", wrap: true},
+                  {type: "TextBlock", text: "Extra detail text", wrap: true},
+                  {type: "TextBlock", text: "Section: runbook step 1", wrap: true},
+                  {type: "TextBlock", text: ("[Triggered from](" + $run_url + ")"), wrap: true}
+                ],
+                actions: [{type: "Action.OpenUrl", title: "Open run", url: $run_url}]
+              }
+            }]
+          }')
+          curl -s -o resp.txt -w "HTTP %{http_code}\n" -X POST \
+            "${SERVICE_URL}v3/conversations/$CHANNEL_ID/activities" \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            -d "$payload"
+          cat resp.txt
